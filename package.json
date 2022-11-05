@@ -1,0 +1,18 @@
+{
+  "name": "trading-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@alpacahq/alpaca-trade-api": "^2.16.1",
+    "@binance/connector": "^2.0.0-rc.2",
+    "axios": "^1.1.2",
+    "dotenv": "^16.0.3",
+    "node-schedule": "^2.1.0"
+  }
+}
