@@ -1,35 +1,41 @@
+require('dotenv').config({ path: '../.env' })
 const schedule = require('node-schedule');
+const { getLoopInterval, getOpenOrdersInterval } = require('./cronIntervals');
 const Binance = require('./Binance');
+const Strategies = require('./Strategies');
 const Logger = require('./Logger');
+const Indicators = require('./Indicators');
 
 class TradeBot {
     constructor() {
         this.logger = Logger;
         this.binance = new Binance();
         this.orders = [];
+        this.tradeAccountPercentage = parseFloat(process.env.TRADE_ACCOUNT_PERCENTAGE);
     }
 
     async init() {
         const account = await this.binance.client.account();
         console.log(account.data.balances)
 
-        schedule.scheduleJob('logBalances', "*/10 * * * *", async () => { // Every 10 mins
+        schedule.scheduleJob('logBalances', "10 * * * *", async () => { // Every hour at 10 min
             const account = await this.binance.client.account();
-            console.log(account.data.balances)
+            console.log(account.data.balances);
+            console.log(this.orders);
         });
 
         console.log('Market open. Starting trade loop');
-        schedule.scheduleJob('loop', "4 */5 * * * *", async () => { // Every 5 mins in the 2nd second
+        schedule.scheduleJob('loop', getLoopInterval(), async () => {
             await this.searchDataAndPatterns();
         });
 
-        schedule.scheduleJob('checkOpenOrders', "*/4 * * * * *", async () => { // Every 4 seconds
-            await this.checkOpenOrders();
+        schedule.scheduleJob('checkOpenOrders', getOpenOrdersInterval(), async () => {
+            await this.checkOpenOrdersAndMakeSLTP();
         });
     }
 
     async searchDataAndPatterns() {
-        console.log('Retrieve data and search patterns');
+        console.log('Retrieve data and search patterns', new Date());
         const marketData = await this.binance.getCandles([
             'BTCUSDT',
             'ETHUSDT',
@@ -38,76 +44,23 @@ class TradeBot {
             //'TRXUSDT',
             //'XRPUSDT',
             'BNBUSDT'
-        ],
-            '5m',
-            3);
+        ]);
 
         for (const currency of marketData) {
             try {
                 console.log(currency.name);
-                const bullishEngulfing = this.searchBullishEngulfingPattern(currency.data);
-
-                if (bullishEngulfing) {
-                    await this.buy(currency);
-                    break;
-                }
+                if (currency.data.length != process.env.CANDLESTICK_QTY) break;
+                // await this.checkSellSmaCross(currency);
+                // await this.executeBullishEngulfingStrategy(currency);
+                // await this.executeSmaCrossStrategy(currency);
+                console.log('ST', Indicators.Supertrend(currency.name, currency.data,10,2));
             } catch (error) {
-                console.log(error.response.data.msg);
+                console.log(error);
             }
         }
     }
 
-    searchBullishEngulfingPattern(bars) {
-        // check 1st bar to be negative
-        if (!(bars[0].close < bars[0].open)) return false;
-        console.log('1st check pass')
-
-        // check 2nd bar to open lower than 1st bar close
-        if (!(bars[1].open <= bars[0].close)) return false;
-        console.log('2nd check pass')
-
-        // check 2nd bar close to be higher than 1st bar open
-        if (!(bars[1].close > bars[0].open)) return false;
-        console.log('3rd check pass')
-
-        // check 2nd bar volume to be higher than 1st bar volume
-        if (!(bars[1].volume > bars[0].volume)) return false;
-        console.log('4th check pass')
-
-        // check 2nd bar shadow to be smaller than 15% of bar body
-        if (!((bars[1].high - bars[1].close) < ((bars[1].close - bars[1].open) * .15))) return false;
-        console.log('5th check pass')
-
-        return true;
-    }
-
-    async buy(currencyData) {
-        try {
-            const price = currencyData.data[2].close;
-            const stopLoss = currencyData.data[0].low < currencyData.data[1].low
-                ? currencyData.data[0].low
-                : currencyData.data[1].low;
-            const takeProffit = ((price - stopLoss) * 2) + price;
-            const balance = await this.binance.getAssetBalance('USDT');
-            const quantity = (0.2 * balance) / price;
-
-            console.log(`
-            CURRENCY: ${currencyData.name}
-            PRICE: ${price}
-            STOP LOSS: ${stopLoss}
-            TAKE PROFIT: ${takeProffit}
-            BALANCE: ${balance}
-            QUANTITY: ${quantity}
-            `);
-
-            const order = await this.binance.newOrder(currencyData.name, price, quantity, stopLoss, takeProffit);
-            this.orders.push({ ...order, stopLoss, takeProffit });
-        } catch (error) {
-            console.log(error.response.data.msg);
-        }
-    }
-
-    async checkOpenOrders() {
+    async checkOpenOrdersAndMakeSLTP() {
         for (let i = 0; i < this.orders.length; i++) {
             const order = this.orders[i];
 
@@ -115,13 +68,14 @@ class TradeBot {
                 orderId: order.orderId
             });
 
-            if ((binanceOrder.status === 'FILLED' || binanceOrder.status === 'EXPIRED')) { // Make SLTP
+            if ((order.strategy === 'bullishEngulfing' && (binanceOrder.status === 'FILLED' || binanceOrder.status === 'EXPIRED'))) { // Make SLTP
                 try {
                     if (binanceOrder.executedQty > 0) {
                         this.logger.write(new Date(), binanceOrder.symbol, 'bullishEngulfing', binanceOrder.executedQty, binanceOrder.price, order.stopLoss, order.takeProffit);
                         console.log(`
                         BUY ORDER FILLED
                         symbol: ${order.symbol}
+                        ${new Date()}
                         orderId: ${order.orderId}
                         qty: ${binanceOrder.executedQty}
                         `)
@@ -139,6 +93,116 @@ class TradeBot {
                     console.log(error);
                 }
             }
+        }
+    }
+
+    async checkSellSmaCross(currency) {
+        try {
+            const smaCrossOpenOrderIndex = this.orders.findIndex(o => o.strategy === 'smaCross' && o.symbol === currency.name);
+            if (smaCrossOpenOrderIndex === -1) return;
+
+            const smaCross = Strategies.smaCross(process.env.SHORT_SMA_ROUNDS, process.env.LONG_SMA_ROUNDS, currency.data, 'SELL');
+
+            if (smaCross) {
+                const order = this.orders[smaCrossOpenOrderIndex];
+                const { data: binanceOrder } = await this.binance.client.getOrder(order.symbol, {
+                    orderId: order.orderId
+                });
+
+                console.log(`
+                CURRENCY: ${binanceOrder.symbol}
+                ${new Date()}
+                STRATEGY: SMA CROSS SELL
+                PRICE: ${currency.data[currency.data.length - 1].close}
+                QUANTITY: ${binanceOrder.executedQty}
+                `);
+
+                await this.binance.newOrder(
+                    binanceOrder.symbol,
+                    'SELL',
+                    'MARKET',
+                    null,
+                    binanceOrder.executedQty,
+                    null
+                );
+
+                this.orders.splice(smaCrossOpenOrderIndex, 1);
+            }
+        } catch (error) {
+            console.log(error);
+        }
+
+    }
+
+    async executeBullishEngulfingStrategy(currency) {
+        try {
+            const bullishEngulfing = Strategies.bullishEngulfing(currency.data);
+
+            if (bullishEngulfing) {
+                const { price, stopLoss, takeProffit } = bullishEngulfing;
+                const balance = await this.binance.getAssetBalance('USDT');
+                const quantity = (this.tradeAccountPercentage * balance) / price;
+
+                console.log(`
+                CURRENCY: ${currency.name}
+                ${new Date()}
+                STRATEGY: BULLISHENGULFING
+                PRICE: ${price}
+                STOP LOSS: ${stopLoss}
+                TAKE PROFIT: ${takeProffit}
+                BALANCE: ${balance}
+                QUANTITY: ${quantity}
+                `);
+
+                const order = await this.binance.newOrder(
+                    currency.name,
+                    'BUY',
+                    'LIMIT',
+                    price,
+                    quantity,
+                    'IOC'
+                );
+
+                this.orders.push({ ...order, stopLoss, takeProffit, strategy: 'bullishEngulfing' });
+            }
+        } catch (error) {
+            console.log(error);
+        }
+
+    }
+
+    async executeSmaCrossStrategy(currency) {
+        try {
+            const crossSMA = Strategies.smaCross(parseInt(process.env.SHORT_SMA_ROUNDS), parseInt(process.env.LONG_SMA_ROUNDS), currency.data);
+
+            if (crossSMA) {
+                const { price } = crossSMA;
+                const balance = await this.binance.getAssetBalance('USDT');
+                const quantity = (this.tradeAccountPercentage * balance) / price;
+
+                console.log(`
+                CURRENCY: ${currency.name}
+                ${new Date()}
+                STRATEGY: SMA CROSS BUY
+                PRICE: ${price}
+                BALANCE: ${balance}
+                QUANTITY: ${quantity}
+                `);
+
+                const order = await this.binance.newOrder(
+                    currency.name,
+                    'BUY',
+                    'MARKET',
+                    null,
+                    quantity,
+                    null
+                );
+
+                this.orders.push({ ...order, strategy: 'smaCross' });
+                this.logger.write(new Date(), currency.name, 'SMA-CROSS', quantity, price, null, null);
+            }
+        } catch (error) {
+            console.log(error);
         }
     }
 }

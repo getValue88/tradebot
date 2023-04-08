@@ -3,7 +3,6 @@ const { Spot } = require('@binance/connector')
 
 class Binance {
     constructor() {
-        console.log(process.env)
         this.client = new Spot(process.env.BINANCE_API_KEY, process.env.BINANCE_API_SECRET, {
             baseURL: process.env.BINANCE_BASE_URL
         });
@@ -22,10 +21,10 @@ class Binance {
         return Number(assetData.free);
     }
 
-    async getCandles(symbols, interval, limit) {
+    async getCandles(symbols) {
         const response = []
         for (const symbol of symbols) {
-            const { data } = await this.client.klines(symbol, interval, { limit: limit });
+            const { data } = await this.client.klines(symbol, `${process.env.TRADE_INTERVAL}${process.env.TRADE_INTERVAL_UNIT}`, { limit: process.env.CANDLESTICK_QTY });
 
             response.push({
                 name: symbol,
@@ -46,7 +45,7 @@ class Binance {
         return response;
     }
 
-    async newOrder(symbol, price, quantity) {
+    async newOrder(symbol, side, type, price, quantity, timeInForce) {
         const asset = this.marketInfo.find(el => el.symbol === symbol);
         const assetLotSize = asset.filters.find(filter => filter.filterType === 'LOT_SIZE');
         let formattedQuantity = Number(Number(quantity).toFixed(asset.baseAssetPrecision));
@@ -57,11 +56,11 @@ class Binance {
         }
 
         try {
-            const { data: order } = await this.client.newOrder(symbol, 'BUY', 'LIMIT',
+            const { data: order } = await this.client.newOrder(symbol, side, type,
                 {
-                    price,
+                    price: price ?? null,
                     quantity: formattedQuantity,
-                    timeInForce: 'IOC'
+                    timeInForce: timeInForce ?? null
                 }
             );
             return order;
@@ -74,6 +73,7 @@ class Binance {
         console.log(`
         make SLTP orders
         symbol: ${symbol}
+        ${new Date()}
         quantity: ${quantity} 
         stopLoss: ${stopLoss}
         takeProfit: ${takeProfit}
@@ -94,9 +94,9 @@ class Binance {
             'SELL',
             formattedQuantity,
             takeProfit.toFixed(asset.baseAssetPrecision),
-            (stopLoss + (assetPriceFilter.tickSize * 5)).toFixed(asset.baseAssetPrecision),
+            stopLoss.toFixed(asset.baseAssetPrecision),
             {
-                stopLimitPrice: stopLoss.toFixed(asset.baseAssetPrecision),
+                stopLimitPrice: (stopLoss + (assetPriceFilter.tickSize * 5)).toFixed(asset.baseAssetPrecision),
                 stopLimitTimeInForce: 'GTC'
             });
 
